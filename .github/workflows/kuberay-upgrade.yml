@@ -1,0 +1,18 @@
+name: Test KubeRay Operator Upgrade to latest available helm image
+
+on:
+  repository_dispatch:
+    types: [branch-dispatch]
+
+jobs:
+  run_kuberay_upgrade_tests:
+    runs-on: kuberay-testing # target runner
+    permissions:
+      contents: read
+    steps:
+      start test
+      - name: dummy test
+        run: |
+          sleep 60 # test success
+      #     # sleep 300 # test failure
+      #     # exit 1 # test failure
