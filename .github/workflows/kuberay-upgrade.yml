@@ -10,7 +10,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      start test
       - name: dummy test
         run: |
           sleep 60 # test success
