@@ -10,6 +10,9 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Clone KubeRay repository
         run: |
           git clone --depth=1 --branch dev https://github.com/opendatahub-io/kuberay.git
