@@ -1,0 +1,23 @@
+name: 'Install KubeRay Operator'
+description: 'Installs KubeRay Operator with specified version and waits for it to be available'
+
+inputs:
+  version:
+    description: 'Version of KubeRay Operator to install'
+    required: true
+  timeout:
+    description: 'Timeout for waiting for operator to be available (default: 90s)'
+    required: false
+    default: '90s'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install KubeRay Operator
+      run: |
+        helm install kuberay-operator kuberay/kuberay-operator --version ${{ inputs.version }}
+      shell: bash
+
+    - name: Wait for KubeRay Operator to be available
+      run: kubectl wait --timeout=${{ inputs.timeout }} --for=condition=Available=true deployment -n default kuberay-operator
+      shell: bash

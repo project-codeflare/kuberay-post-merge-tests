@@ -1,0 +1,19 @@
+name: 'Setup Kind Cluster with KubeRay Helm Repo'
+description: 'Creates a Kind cluster, sets up kubectl context, and adds KubeRay helm repository'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Create Kind Cluster
+      run: kind create cluster
+      shell: bash
+
+    - name: Set kubectl context
+      run: kubectl cluster-info --context kind-kind
+      shell: bash
+
+    - name: Add KubeRay Helm Repository
+      run: |
+        helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+        helm repo update
+      shell: bash
