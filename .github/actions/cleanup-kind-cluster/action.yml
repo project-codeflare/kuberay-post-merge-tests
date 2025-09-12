@@ -1,0 +1,9 @@
+name: 'Cleanup Kind Cluster'
+description: 'Deletes all Kind clusters for cleanup'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Cleanup
+      run: kind delete clusters --all || true
+      shell: bash

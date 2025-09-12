@@ -1,0 +1,28 @@
+name: 'Debug Kubernetes Cluster'
+description: 'Comprehensive debugging information for Kubernetes cluster and system resources'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Debug Kubernetes Cluster on Failure
+      run: |
+        echo "--- DEBUG OUTPUT ---"
+        echo "Checking GitHub Runner resources..."
+        lscpu
+        free -h
+        echo "Checking Kubernetes cluster state..."
+        kubectl cluster-info
+        kubectl get nodes
+        
+        echo "Describing all nodes..."
+        kubectl describe nodes
+        echo "Printing all Kubernetes events..."
+        kubectl get events -A
+        echo "Getting logs of Kind control plane container..."
+        docker logs kind-control-plane
+        echo "--- END OF DEBUG OUTPUT ---"
+      shell: bash
+
+    - name: Display all pods on kind cluster
+      run: kubectl get pods -A
+      shell: bash
