@@ -16,19 +16,6 @@ jobs:
       - name: Clone KubeRay repository
         run: |
           git clone --depth=1 --branch dev https://github.com/opendatahub-io/kuberay.git
-
-      - name: Clone upstream KubeRay repository for test files
-        run: |
-          git clone --depth=1 --branch master https://github.com/ray-project/kuberay.git kuberay-upstream
-
-      - name: Replace test files from upstream (temp fix due to re-sync uf midstream)
-        run: |
-          # Replace the two test files with upstream versions
-          cp kuberay-upstream/ray-operator/test/e2eupgrade/rayservice_operator_upgrade_test.go kuberay/ray-operator/test/e2eupgrade/rayservice_operator_upgrade_test.go
-          cp kuberay-upstream/ray-operator/test/e2eupgrade/support.go kuberay/ray-operator/test/e2eupgrade/support.go
-          
-          # Clean up upstream clone to save space
-          rm -rf kuberay-upstream
       
       - name: Set up Go
         uses: actions/setup-go@v5
