@@ -62,7 +62,7 @@ jobs:
 
           set -euo pipefail
           cd kuberay/ray-operator
-          go test -timeout 120m -v ./test/e2e -run "^(?!.*TestRayJobRecovery).*$" -json 2>&1 | tee ./gotest.log | gotestfmt
+          go test -timeout 120m -v ./test/e2e -skip "TestRayJobRecovery" -json 2>&1 | tee ./gotest.log | gotestfmt
 
       - name: Print KubeRay operator logs
         if: steps.deploy.outcome == 'success'
