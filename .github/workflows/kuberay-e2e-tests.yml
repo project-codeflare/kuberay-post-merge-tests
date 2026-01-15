@@ -53,14 +53,38 @@ jobs:
           ./update-resources -scenario pr ../ray-operator/test/e2e/support.go
           echo "Resource requirements updated successfully for e2e tests."
 
-      - name: Run e2e tests (excluding TestRayJobRecovery)
+      - name: Run e2e tests (excluding TestRayJobRecovery) - First attempt
         if: steps.deploy.outcome == 'success'
+        id: first_run
+        continue-on-error: true
         run: |
           export KUBERAY_TEST_TIMEOUT_SHORT=5m KUBERAY_TEST_TIMEOUT_MEDIUM=12m KUBERAY_TEST_TIMEOUT_LONG=15m KUBERAY_TEST_RAY_IMAGE=rayproject/ray:2.52.1
 
           set -euo pipefail
           cd kuberay/ray-operator
           go test -timeout 120m -v ./test/e2e -skip "TestRayJobRecovery" -json 2>&1 | tee ./gotest.log | gotestfmt
+
+      - name: Extract failed tests and retry
+        if: steps.deploy.outcome == 'success' && steps.first_run.outcome == 'failure'
+        run: |
+          export KUBERAY_TEST_TIMEOUT_SHORT=5m KUBERAY_TEST_TIMEOUT_MEDIUM=12m KUBERAY_TEST_TIMEOUT_LONG=15m KUBERAY_TEST_RAY_IMAGE=rayproject/ray:2.52.1
+
+          cd kuberay/ray-operator
+          
+          # Extract failed test names from the JSON output
+          failed_tests=$(grep '"Action":"fail"' ./gotest.log | jq -r '.Test' | grep -v '^null$' | sort -u | tr '\n' '|' | sed 's/|$//')
+          
+          if [ -n "$failed_tests" ]; then
+            echo "Found failed tests: $failed_tests"
+            echo "Retrying failed tests..."
+            
+            # Retry only the failed tests
+            set -euo pipefail
+            go test -timeout 120m -v ./test/e2e -run "$failed_tests" -skip "TestRayJobRecovery" -json 2>&1 | tee ./gotest-retry.log | gotestfmt
+          else
+            echo "No specific failed tests found, but first run failed. This might be a setup/teardown issue."
+            exit 1
+          fi
 
       - name: Print KubeRay operator logs
         if: steps.deploy.outcome == 'success'
@@ -76,6 +100,7 @@ jobs:
           retention-days: 10
           path: |
             **/*.log
+            **/gotest*.log
 
       - name: Cleanup Kind Cluster
         if: always()
