@@ -71,16 +71,46 @@ jobs:
 
           cd kuberay/ray-operator
           
-          # Extract failed test names from the JSON output, including subtests
-          # Look for both "fail" and "skip" actions that indicate test failures
-          failed_tests=$(grep -E '"Action":"(fail|skip)"' ./gotest.log | jq -r 'select(.Test != null and .Test != "") | .Test' | grep -v '^null$' | sort -u)
+          # Extract failed test names from the JSON output
+          # Only get the most specific failed tests (subtests, not parent tests)
+          all_failed_tests=$(grep -E '"Action":"(fail|skip)"' ./gotest.log | jq -r 'select(.Test != null and .Test != "") | .Test' | grep -v '^null$' | sort -u)
+          
+          # Filter to get only the most specific tests (those with "/" are subtests)
+          # If a subtest failed, don't include its parent test
+          failed_tests=""
+          while IFS= read -r test; do
+            if [[ "$test" == *"/"* ]]; then
+              # This is a subtest, include it
+              if [ -n "$failed_tests" ]; then
+                failed_tests="$failed_tests"$'\n'"$test"
+              else
+                failed_tests="$test"
+              fi
+            else
+              # This is a parent test, only include if no subtests of it are already included
+              parent_has_subtest=false
+              while IFS= read -r existing_test; do
+                if [[ "$existing_test" == "$test/"* ]]; then
+                  parent_has_subtest=true
+                  break
+                fi
+              done <<< "$failed_tests"
+              
+              if [ "$parent_has_subtest" = false ]; then
+                if [ -n "$failed_tests" ]; then
+                  failed_tests="$failed_tests"$'\n'"$test"
+                else
+                  failed_tests="$test"
+                fi
+              fi
+            fi
+          done <<< "$all_failed_tests"
           
           if [ -n "$failed_tests" ]; then
             echo "Found failed tests:"
             echo "$failed_tests"
             
             # Create a regex pattern that matches the exact failed tests
-            # Escape special regex characters and create exact match patterns
             failed_pattern=""
             while IFS= read -r test; do
               if [ -n "$failed_pattern" ]; then
@@ -95,8 +125,43 @@ jobs:
             echo "Retrying failed tests..."
             
             # Retry only the failed tests
+            # Use a more specific approach: if we have subtests, run them individually
             set -euo pipefail
-            go test -timeout 120m -v ./test/e2e -run "$failed_pattern" -skip "TestRayJobRecovery" -json 2>&1 | tee ./gotest-retry.log | gotestfmt
+            
+            # Check if we have any subtests (containing "/")
+            has_subtests=false
+            while IFS= read -r test; do
+              if [[ "$test" == *"/"* ]]; then
+                has_subtests=true
+                break
+              fi
+            done <<< "$failed_tests"
+            
+            if [ "$has_subtests" = true ]; then
+              # Run each subtest individually to avoid parent test interference
+              echo "Running subtests individually..."
+              retry_success=true
+              while IFS= read -r test; do
+                if [[ "$test" == *"/"* ]]; then
+                  echo "Retrying: $test"
+                  escaped_test=$(echo "$test" | sed 's/[[\.*^$()+?{|]/\\&/g')
+                  if ! go test -timeout 120m -v ./test/e2e -run "^${escaped_test}$" -skip "TestRayJobRecovery" -json 2>&1 | tee -a ./gotest-retry.log | gotestfmt; then
+                    retry_success=false
+                    echo "❌ Retry failed for: $test"
+                  else
+                    echo "✅ Retry passed for: $test"
+                  fi
+                fi
+              done <<< "$failed_tests"
+              
+              if [ "$retry_success" = false ]; then
+                echo "Some retried tests still failed"
+                exit 1
+              fi
+            else
+              # No subtests, run normally
+              go test -timeout 120m -v ./test/e2e -run "$failed_pattern" -skip "TestRayJobRecovery" -json 2>&1 | tee ./gotest-retry.log | gotestfmt
+            fi
           else
             echo "No specific failed tests found, but first run failed. This might be a setup/teardown issue."
             exit 1
