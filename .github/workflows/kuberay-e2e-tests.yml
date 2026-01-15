@@ -71,16 +71,32 @@ jobs:
 
           cd kuberay/ray-operator
           
-          # Extract failed test names from the JSON output
-          failed_tests=$(grep '"Action":"fail"' ./gotest.log | jq -r '.Test' | grep -v '^null$' | sort -u | tr '\n' '|' | sed 's/|$//')
+          # Extract failed test names from the JSON output, including subtests
+          # Look for both "fail" and "skip" actions that indicate test failures
+          failed_tests=$(grep -E '"Action":"(fail|skip)"' ./gotest.log | jq -r 'select(.Test != null and .Test != "") | .Test' | grep -v '^null$' | sort -u)
           
           if [ -n "$failed_tests" ]; then
-            echo "Found failed tests: $failed_tests"
+            echo "Found failed tests:"
+            echo "$failed_tests"
+            
+            # Create a regex pattern that matches the exact failed tests
+            # Escape special regex characters and create exact match patterns
+            failed_pattern=""
+            while IFS= read -r test; do
+              if [ -n "$failed_pattern" ]; then
+                failed_pattern="$failed_pattern|"
+              fi
+              # Escape the test name for regex and ensure exact match
+              escaped_test=$(echo "$test" | sed 's/[[\.*^$()+?{|]/\\&/g')
+              failed_pattern="$failed_pattern^${escaped_test}$"
+            done <<< "$failed_tests"
+            
+            echo "Retry pattern: $failed_pattern"
             echo "Retrying failed tests..."
             
             # Retry only the failed tests
             set -euo pipefail
-            go test -timeout 120m -v ./test/e2e -run "$failed_tests" -skip "TestRayJobRecovery" -json 2>&1 | tee ./gotest-retry.log | gotestfmt
+            go test -timeout 120m -v ./test/e2e -run "$failed_pattern" -skip "TestRayJobRecovery" -json 2>&1 | tee ./gotest-retry.log | gotestfmt
           else
             echo "No specific failed tests found, but first run failed. This might be a setup/teardown issue."
             exit 1
