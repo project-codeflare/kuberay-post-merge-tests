@@ -108,6 +108,14 @@ jobs:
           echo "Printing KubeRay operator logs"
           kubectl logs -n default --tail -1 -l app.kubernetes.io/name=kuberay-operator app.kubernetes.io/name=kuberay | tee ./kuberay-operator.log
 
+      - name: Print debug info
+        if: failure()
+        run: |
+          kubectl describe nodes
+          kubectl get namespaces
+          kubectl get pods -A
+          kubectl get raycluster -A
+
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
