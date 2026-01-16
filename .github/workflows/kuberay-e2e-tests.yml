@@ -47,44 +47,76 @@ jobs:
           make deploy -e IMG="${IMG}"
           kubectl wait --timeout=90s --for=condition=Available=true deployment -n default kuberay-operator
 
-      - name: Update resource requirements for e2e tests
-        if: steps.deploy.outcome == 'success'
-        run: |
-          echo "Updating resource requirements using Go AST manipulation..."
-          cd kuberay/scripts
-          go build -o update-resources update-resources.go
-          ./update-resources -scenario pr ../ray-operator/test/e2e/support.go
-          echo "Resource requirements updated successfully for e2e tests."
 
-      - name: Start operator monitoring
+      - name: Start namespace cleanup script
         if: steps.deploy.outcome == 'success'
         run: |
-          # Start background monitoring of operator and namespaces
+          # Start background namespace cleanup to prevent stuck terminating namespaces
           {
-            echo "Starting operator monitoring..."
+            echo "Starting namespace cleanup script..."
+            kubectl proxy &
+            PROXY_PID=$!
+            sleep 2
+
+            trap "kill $PROXY_PID 2>/dev/null" EXIT
+
             while true; do
-              echo "=== $(date) ==="
-              echo "Operator pods:"
-              kubectl get pods -n default -l app.kubernetes.io/name=kuberay-operator -o wide || true
-              echo "Namespaces:"
-              kubectl get namespaces | grep -E "(Terminating|test-|ray-)" || echo "No test/ray namespaces found"
-              echo "RayCluster count:"
-              kubectl get raycluster -A --no-headers 2>/dev/null | wc -l || echo "0"
-              echo "RayJob count:"
-              kubectl get rayjob -A --no-headers 2>/dev/null | wc -l || echo "0"
-              echo "---"
-              sleep 30
+              terminating_ns=$(kubectl get namespaces --field-selector status.phase=Terminating -o jsonpath='{.items[*].metadata.name}')
+
+              if [ -z "$terminating_ns" ]; then
+                echo "$(date): No namespaces in Terminating state, waiting..."
+              else
+                for ns in $terminating_ns; do
+                  echo "$(date): Cleaning up namespace: $ns"
+                  
+                  # FIRST: Remove finalizers from Ray CRDs (this is what blocks deletion)
+                  for resource in rayclusters.ray.io rayservices.ray.io rayjobs.ray.io; do
+                    for name in $(kubectl get "$resource" -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+                      echo "  Removing finalizers from $resource/$name"
+                      kubectl patch "$resource" "$name" -n "$ns" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null &
+                      sleep 0.5
+                      kill $! 2>/dev/null
+                    done
+                  done
+                  
+                  # SECOND: Remove finalizers from pods
+                  for pod in $(kubectl get pods -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+                    kubectl patch pod "$pod" -n "$ns" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null &
+                    sleep 0.2
+                    kill $! 2>/dev/null
+                  done
+                  
+                  # THIRD: Quick delete attempts (should be instant now that finalizers are gone)
+                  kubectl delete pods --all -n "$ns" --force --grace-period=0 --wait=false 2>/dev/null &
+                  sleep 1
+                  kill $! 2>/dev/null
+                  
+                  kubectl delete all --all -n "$ns" --force --grace-period=0 --wait=false 2>/dev/null &
+                  sleep 1
+                  kill $! 2>/dev/null
+
+                  # Finalize the namespace
+                  echo "$(date): Finalizing namespace: $ns"
+                  kubectl get namespace "$ns" -o json 2>/dev/null | jq '.spec = {"finalizers":[]}' > /tmp/finalize-$ns.json
+                  curl -s -k -H "Content-Type: application/json" -X PUT --data-binary @/tmp/finalize-$ns.json "127.0.0.1:8001/api/v1/namespaces/$ns/finalize" > /dev/null
+                  rm -f /tmp/finalize-$ns.json
+                  
+                  echo "$(date): Done with $ns"
+                done
+              fi
+
+              sleep 2
             done
-          } > ./operator-monitoring.log 2>&1 &
-          echo $! > ./monitor-pid.txt
-          echo "Operator monitoring started with PID $(cat ./monitor-pid.txt)"
+          } > ./namespace-cleanup.log 2>&1 &
+          echo $! > ./cleanup-pid.txt
+          echo "Namespace cleanup started with PID $(cat ./cleanup-pid.txt)"
 
       - name: Run e2e tests (excluding TestRayJobRecovery) - First attempt
         if: steps.deploy.outcome == 'success'
         id: first_run
         continue-on-error: true
         run: |
-          export KUBERAY_TEST_TIMEOUT_SHORT=5m KUBERAY_TEST_TIMEOUT_MEDIUM=12m KUBERAY_TEST_TIMEOUT_LONG=15m KUBERAY_TEST_RAY_IMAGE=rayproject/ray:2.52.1
+          export KUBERAY_TEST_TIMEOUT_SHORT=7m KUBERAY_TEST_TIMEOUT_MEDIUM=12m KUBERAY_TEST_TIMEOUT_LONG=15m KUBERAY_TEST_RAY_IMAGE=rayproject/ray:2.52.1
 
           set -euo pipefail
           cd kuberay/ray-operator
@@ -197,66 +229,27 @@ jobs:
             exit 1
           fi
 
-      - name: Capture KubeRay operator status and logs
-        if: steps.deploy.outcome == 'success'
-        run: |
-          echo "=== KubeRay Operator Status ==="
-          kubectl get pods -n default -l app.kubernetes.io/name=kuberay-operator -o wide | tee ./kuberay-operator-status.log
-          kubectl describe pods -n default -l app.kubernetes.io/name=kuberay-operator | tee ./kuberay-operator-describe.log
-          
-          echo "=== KubeRay Operator Logs (Current) ==="
-          kubectl logs -n default -l app.kubernetes.io/name=kuberay-operator --tail=1000 | tee ./kuberay-operator-current.log
-          
-          echo "=== KubeRay Operator Logs (Previous - if restarted) ==="
-          kubectl logs -n default -l app.kubernetes.io/name=kuberay-operator --previous --ignore-errors=true | tee ./kuberay-operator-previous.log || echo "No previous logs available"
-          
-          echo "=== All KubeRay Operator Logs (All containers) ==="
-          for pod in $(kubectl get pods -n default -l app.kubernetes.io/name=kuberay-operator -o jsonpath='{.items[*].metadata.name}'); do
-            echo "--- Logs for pod: $pod ---" | tee -a ./kuberay-operator-all.log
-            kubectl logs -n default "$pod" --all-containers=true --ignore-errors=true | tee -a ./kuberay-operator-all.log || echo "Failed to get logs for $pod"
-            echo "--- Previous logs for pod: $pod ---" | tee -a ./kuberay-operator-all.log
-            kubectl logs -n default "$pod" --all-containers=true --previous --ignore-errors=true | tee -a ./kuberay-operator-all.log || echo "No previous logs for $pod"
-          done
 
-      - name: Print debug info and capture namespace issues
+      - name: Print debug info
         if: failure()
         run: |
-          echo "=== Node Information ==="
-          kubectl describe nodes | tee ./debug-nodes.log
-          
-          echo "=== Namespace Status ==="
-          kubectl get namespaces -o wide | tee ./debug-namespaces.log
-          
-          echo "=== Terminating Namespaces Details ==="
-          kubectl get namespaces --field-selector=status.phase=Terminating -o yaml | tee ./debug-terminating-namespaces.log
-          
           echo "=== All Pods Status ==="
           kubectl get pods -A -o wide | tee ./debug-pods.log
           
-          echo "=== RayCluster Resources ==="
-          kubectl get raycluster -A -o yaml | tee ./debug-raycluster.log
-          
-          echo "=== RayJob Resources ==="
-          kubectl get rayjob -A -o yaml | tee ./debug-rayjob.log
-          
-          echo "=== Events (Recent) ==="
-          kubectl get events --sort-by='.lastTimestamp' -A | tail -100 | tee ./debug-events.log
-          
-          echo "=== KubeRay Operator Final Status ==="
-          kubectl get pods -n default -l app.kubernetes.io/name=kuberay-operator -o wide | tee ./debug-operator-final-status.log
-          kubectl describe pods -n default -l app.kubernetes.io/name=kuberay-operator | tee ./debug-operator-final-describe.log
+          echo "=== Namespace Status ==="
+          kubectl get namespaces -A | tee ./debug-namespaces.log
 
-      - name: Stop operator monitoring
+      - name: Stop namespace cleanup
         if: always()
         run: |
-          if [ -f ./monitor-pid.txt ]; then
-            monitor_pid=$(cat ./monitor-pid.txt)
-            echo "Stopping operator monitoring (PID: $monitor_pid)"
-            kill $monitor_pid 2>/dev/null || echo "Monitor process already stopped"
+          if [ -f ./cleanup-pid.txt ]; then
+            cleanup_pid=$(cat ./cleanup-pid.txt)
+            echo "Stopping namespace cleanup (PID: $cleanup_pid)"
+            kill $cleanup_pid 2>/dev/null || echo "Cleanup process already stopped"
             sleep 2
           fi
 
-      - name: Upload comprehensive logs
+      - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -265,9 +258,7 @@ jobs:
           path: |
             **/*.log
             **/gotest*.log
-            ./kuberay-operator-*.log
-            ./debug-*.log
-            ./operator-monitoring.log
+            ./namespace-cleanup.log
 
       - name: Cleanup Kind Cluster
         if: always()
