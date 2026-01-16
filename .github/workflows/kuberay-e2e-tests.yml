@@ -28,6 +28,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
       - name: Setup Kind Cluster with KubeRay Helm Repo
         uses: ./.github/actions/setup-kind-cluster
 
@@ -52,6 +55,29 @@ jobs:
           go build -o update-resources update-resources.go
           ./update-resources -scenario pr ../ray-operator/test/e2e/support.go
           echo "Resource requirements updated successfully for e2e tests."
+
+      - name: Start operator monitoring
+        if: steps.deploy.outcome == 'success'
+        run: |
+          # Start background monitoring of operator and namespaces
+          {
+            echo "Starting operator monitoring..."
+            while true; do
+              echo "=== $(date) ==="
+              echo "Operator pods:"
+              kubectl get pods -n default -l app.kubernetes.io/name=kuberay-operator -o wide || true
+              echo "Namespaces:"
+              kubectl get namespaces | grep -E "(Terminating|test-|ray-)" || echo "No test/ray namespaces found"
+              echo "RayCluster count:"
+              kubectl get raycluster -A --no-headers 2>/dev/null | wc -l || echo "0"
+              echo "RayJob count:"
+              kubectl get rayjob -A --no-headers 2>/dev/null | wc -l || echo "0"
+              echo "---"
+              sleep 30
+            done
+          } > ./operator-monitoring.log 2>&1 &
+          echo $! > ./monitor-pid.txt
+          echo "Operator monitoring started with PID $(cat ./monitor-pid.txt)"
 
       - name: Run e2e tests (excluding TestRayJobRecovery) - First attempt
         if: steps.deploy.outcome == 'success'
@@ -124,72 +150,124 @@ jobs:
             echo "Retry pattern: $failed_pattern"
             echo "Retrying failed tests..."
             
-            # Retry only the failed tests
-            # Use a more specific approach: if we have subtests, run them individually
-            set -euo pipefail
-            
-            # Check if we have any subtests (containing "/")
-            has_subtests=false
+            # Use gotestsum approach similar to opendatahub-io/kuberay run-tests.sh
+            # Create a regex pattern that matches only the specific failed tests
+            # Extract unique parent test names (before the "/") for failed subtests
+            parent_tests=""
             while IFS= read -r test; do
               if [[ "$test" == *"/"* ]]; then
-                has_subtests=true
-                break
+                # Extract parent test name
+                parent_test="${test%%/*}"
+                if [[ "$parent_tests" != *"$parent_test"* ]]; then
+                  if [ -n "$parent_tests" ]; then
+                    parent_tests="$parent_tests|$parent_test"
+                  else
+                    parent_tests="$parent_test"
+                  fi
+                fi
+              else
+                # This is already a parent test
+                if [[ "$parent_tests" != *"$test"* ]]; then
+                  if [ -n "$parent_tests" ]; then
+                    parent_tests="$parent_tests|$test"
+                  else
+                    parent_tests="$test"
+                  fi
+                fi
               fi
             done <<< "$failed_tests"
             
-            if [ "$has_subtests" = true ]; then
-              # Run each subtest individually to avoid parent test interference
-              echo "Running subtests individually..."
-              retry_success=true
-              while IFS= read -r test; do
-                if [[ "$test" == *"/"* ]]; then
-                  echo "Retrying: $test"
-                  escaped_test=$(echo "$test" | sed 's/[[\.*^$()+?{|]/\\&/g')
-                  if ! go test -timeout 120m -v ./test/e2e -run "^${escaped_test}$" -skip "TestRayJobRecovery" -json 2>&1 | tee -a ./gotest-retry.log | gotestfmt; then
-                    retry_success=false
-                    echo "❌ Retry failed for: $test"
-                  else
-                    echo "✅ Retry passed for: $test"
-                  fi
-                fi
-              done <<< "$failed_tests"
-              
-              if [ "$retry_success" = false ]; then
-                echo "Some retried tests still failed"
-                exit 1
-              fi
+            # Create exact match pattern like in run-tests.sh
+            if [[ "$parent_tests" == *"|"* ]]; then
+              # Multiple tests - create pattern like ^(TestA|TestB)$
+              retry_pattern="^($parent_tests)$"
             else
-              # No subtests, run normally
-              go test -timeout 120m -v ./test/e2e -run "$failed_pattern" -skip "TestRayJobRecovery" -json 2>&1 | tee ./gotest-retry.log | gotestfmt
+              # Single test - create pattern like ^TestA$
+              retry_pattern="^$parent_tests$"
             fi
+            
+            echo "Retry pattern: $retry_pattern"
+            echo "Retrying failed tests using gotestsum..."
+            
+            # Use gotestsum like in the opendatahub-io/kuberay script
+            set -euo pipefail
+            gotestsum --format standard-verbose -- -timeout 120m -run "$retry_pattern" ./test/e2e -p 1 -parallel 1 -json 2>&1 | tee ./gotest-retry.log
           else
             echo "No specific failed tests found, but first run failed. This might be a setup/teardown issue."
             exit 1
           fi
 
-      - name: Print KubeRay operator logs
+      - name: Capture KubeRay operator status and logs
         if: steps.deploy.outcome == 'success'
         run: |
-          echo "Printing KubeRay operator logs"
-          kubectl logs -n default --tail -1 -l app.kubernetes.io/name=kuberay-operator app.kubernetes.io/name=kuberay | tee ./kuberay-operator.log
+          echo "=== KubeRay Operator Status ==="
+          kubectl get pods -n default -l app.kubernetes.io/name=kuberay-operator -o wide | tee ./kuberay-operator-status.log
+          kubectl describe pods -n default -l app.kubernetes.io/name=kuberay-operator | tee ./kuberay-operator-describe.log
+          
+          echo "=== KubeRay Operator Logs (Current) ==="
+          kubectl logs -n default -l app.kubernetes.io/name=kuberay-operator --tail=1000 | tee ./kuberay-operator-current.log
+          
+          echo "=== KubeRay Operator Logs (Previous - if restarted) ==="
+          kubectl logs -n default -l app.kubernetes.io/name=kuberay-operator --previous --ignore-errors=true | tee ./kuberay-operator-previous.log || echo "No previous logs available"
+          
+          echo "=== All KubeRay Operator Logs (All containers) ==="
+          for pod in $(kubectl get pods -n default -l app.kubernetes.io/name=kuberay-operator -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Logs for pod: $pod ---" | tee -a ./kuberay-operator-all.log
+            kubectl logs -n default "$pod" --all-containers=true --ignore-errors=true | tee -a ./kuberay-operator-all.log || echo "Failed to get logs for $pod"
+            echo "--- Previous logs for pod: $pod ---" | tee -a ./kuberay-operator-all.log
+            kubectl logs -n default "$pod" --all-containers=true --previous --ignore-errors=true | tee -a ./kuberay-operator-all.log || echo "No previous logs for $pod"
+          done
 
-      - name: Print debug info
+      - name: Print debug info and capture namespace issues
         if: failure()
         run: |
-          kubectl describe nodes
-          kubectl get namespaces
-          kubectl get pods -A
-          kubectl get raycluster -A
+          echo "=== Node Information ==="
+          kubectl describe nodes | tee ./debug-nodes.log
+          
+          echo "=== Namespace Status ==="
+          kubectl get namespaces -o wide | tee ./debug-namespaces.log
+          
+          echo "=== Terminating Namespaces Details ==="
+          kubectl get namespaces --field-selector=status.phase=Terminating -o yaml | tee ./debug-terminating-namespaces.log
+          
+          echo "=== All Pods Status ==="
+          kubectl get pods -A -o wide | tee ./debug-pods.log
+          
+          echo "=== RayCluster Resources ==="
+          kubectl get raycluster -A -o yaml | tee ./debug-raycluster.log
+          
+          echo "=== RayJob Resources ==="
+          kubectl get rayjob -A -o yaml | tee ./debug-rayjob.log
+          
+          echo "=== Events (Recent) ==="
+          kubectl get events --sort-by='.lastTimestamp' -A | tail -100 | tee ./debug-events.log
+          
+          echo "=== KubeRay Operator Final Status ==="
+          kubectl get pods -n default -l app.kubernetes.io/name=kuberay-operator -o wide | tee ./debug-operator-final-status.log
+          kubectl describe pods -n default -l app.kubernetes.io/name=kuberay-operator | tee ./debug-operator-final-describe.log
 
-      - name: Upload logs
+      - name: Stop operator monitoring
+        if: always()
+        run: |
+          if [ -f ./monitor-pid.txt ]; then
+            monitor_pid=$(cat ./monitor-pid.txt)
+            echo "Stopping operator monitoring (PID: $monitor_pid)"
+            kill $monitor_pid 2>/dev/null || echo "Monitor process already stopped"
+            sleep 2
+          fi
+
+      - name: Upload comprehensive logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
+          name: kuberay-e2e-logs
           retention-days: 10
           path: |
             **/*.log
             **/gotest*.log
+            ./kuberay-operator-*.log
+            ./debug-*.log
+            ./operator-monitoring.log
 
       - name: Cleanup Kind Cluster
         if: always()
