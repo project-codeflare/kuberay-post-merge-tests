@@ -56,12 +56,12 @@ jobs:
             echo "Starting namespace cleanup script..."
             kubectl proxy &
             PROXY_PID=$!
-            sleep 2
+            sleep 3
 
             trap "kill $PROXY_PID 2>/dev/null" EXIT
 
             while true; do
-              terminating_ns=$(kubectl get namespaces --field-selector status.phase=Terminating -o jsonpath='{.items[*].metadata.name}')
+              terminating_ns=$(kubectl get namespaces --field-selector status.phase=Terminating -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
 
               if [ -z "$terminating_ns" ]; then
                 echo "$(date): No namespaces in Terminating state, waiting..."
@@ -73,39 +73,31 @@ jobs:
                   for resource in rayclusters.ray.io rayservices.ray.io rayjobs.ray.io; do
                     for name in $(kubectl get "$resource" -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
                       echo "  Removing finalizers from $resource/$name"
-                      kubectl patch "$resource" "$name" -n "$ns" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null &
-                      sleep 0.5
-                      kill $! 2>/dev/null
+                      timeout 10s kubectl patch "$resource" "$name" -n "$ns" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
                     done
                   done
                   
                   # SECOND: Remove finalizers from pods
                   for pod in $(kubectl get pods -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-                    kubectl patch pod "$pod" -n "$ns" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null &
-                    sleep 0.2
-                    kill $! 2>/dev/null
+                    timeout 5s kubectl patch pod "$pod" -n "$ns" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
                   done
                   
                   # THIRD: Quick delete attempts (should be instant now that finalizers are gone)
-                  kubectl delete pods --all -n "$ns" --force --grace-period=0 --wait=false 2>/dev/null &
-                  sleep 1
-                  kill $! 2>/dev/null
-                  
-                  kubectl delete all --all -n "$ns" --force --grace-period=0 --wait=false 2>/dev/null &
-                  sleep 1
-                  kill $! 2>/dev/null
+                  timeout 10s kubectl delete pods --all -n "$ns" --force --grace-period=0 --wait=false 2>/dev/null || true
+                  timeout 10s kubectl delete all --all -n "$ns" --force --grace-period=0 --wait=false 2>/dev/null || true
 
-                  # Finalize the namespace
+                  # Finalize the namespace via API
                   echo "$(date): Finalizing namespace: $ns"
                   kubectl get namespace "$ns" -o json 2>/dev/null | jq '.spec = {"finalizers":[]}' > /tmp/finalize-$ns.json
-                  curl -s -k -H "Content-Type: application/json" -X PUT --data-binary @/tmp/finalize-$ns.json "127.0.0.1:8001/api/v1/namespaces/$ns/finalize" > /dev/null
+                  curl_result=$(curl -s -k -H "Content-Type: application/json" -X PUT --data-binary @/tmp/finalize-$ns.json "127.0.0.1:8001/api/v1/namespaces/$ns/finalize" 2>&1)
+                  echo "  Finalize result: $curl_result"
                   rm -f /tmp/finalize-$ns.json
                   
                   echo "$(date): Done with $ns"
                 done
               fi
 
-              sleep 2
+              sleep 3
             done
           } > ./namespace-cleanup.log 2>&1 &
           echo $! > ./cleanup-pid.txt
