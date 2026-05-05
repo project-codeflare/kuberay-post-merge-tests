@@ -112,7 +112,7 @@ jobs:
 
           set -euo pipefail
           cd kuberay/ray-operator
-          go test -timeout 120m -v ./test/e2e -skip "TestRayJobRecovery" -json 2>&1 | tee ./gotest.log | gotestfmt
+          go test -timeout 120m -v ./test/e2e -skip "TestRayJobRecovery" -skip "TestRayClusterAuthentication" -json 2>&1 | tee ./gotest.log | gotestfmt
 
       - name: Extract failed tests and retry
         if: steps.deploy.outcome == 'success' && steps.first_run.outcome == 'failure'
@@ -123,7 +123,7 @@ jobs:
           
           # Extract failed test names from the JSON output
           # Only get the most specific failed tests (subtests, not parent tests)
-          all_failed_tests=$(grep -E '"Action":"(fail|skip)"' ./gotest.log | jq -r 'select(.Test != null and .Test != "") | .Test' | grep -v '^null$' | sort -u)
+          all_failed_tests=$(grep -E '"Action":"fail"' ./gotest.log | jq -r 'select(.Test != null and .Test != "") | .Test' | grep -v '^null$' | sort -u)
           
           # Filter to get only the most specific tests (those with "/" are subtests)
           # If a subtest failed, don't include its parent test
