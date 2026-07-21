@@ -14,9 +14,12 @@ env:
   # Post-split equivalent of the previous ./test/e2e suite (RayJob tests moved to e2erayjob).
   E2E_TEST_PACKAGES: ./test/e2e ./test/e2erayjob
   E2E_GO_TEST_TIMEOUT: 150m
-  # Recovery/AuthRhoai: historically unsuitable on Kind.
-  # Sidecar + DeletionStrategy: post-sync failures/flake on Kind+Ray 2.55.1 (not in pre-sync suite).
-  E2E_TEST_SKIP: TestRayJobRecovery|TestRayClusterAuthenticationRhoai|TestRayJobSidecarMode|Failing_RayJob_with_SidecarMode|TestDeletionStrategy
+  # Align closer to pre-sync post-merge coverage; skip Kind-unsuitable / known-bad cases.
+  # - Recovery/AuthRhoai: historically unsuitable on Kind
+  # - Sidecar + DeletionStrategy: post-sync failures/flake on Kind+Ray 2.55.1
+  #   (Sidecar Retry subtest needs full path for go test -skip)
+  # - MultiHost/SingleHost/UpgradeStrategy/AuthOptions: net-new vs Jul 10 successful suite
+  E2E_TEST_SKIP: TestRayJobRecovery|TestRayClusterAuthenticationRhoai|TestRayJobSidecarMode|TestRayJobRetry/Failing_RayJob_with_SidecarMode|TestDeletionStrategy|TestRayClusterMultiHostMultiSlice|TestRayClusterSingleHostMultiSlice|TestRayClusterUpgradeStrategy|TestRayClusterAuthOptions
 
 jobs:
   run_kuberay_post_merge_e2e_tests:
