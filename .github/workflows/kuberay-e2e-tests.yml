@@ -11,11 +11,9 @@ env:
   KUBERAY_TEST_TIMEOUT_SHORT: 7m
   KUBERAY_TEST_TIMEOUT_MEDIUM: 12m
   KUBERAY_TEST_TIMEOUT_LONG: 15m
-  # Operator e2e packages that do not require a separate upgrade-cluster setup.
-  # Excludes: e2eupgrade, e2eincrementalupgrade (covered by kuberay-upgrade.yml / specialized jobs).
-  E2E_TEST_PACKAGES: ./test/e2e ./test/e2erayjob ./test/e2eautoscaler ./test/e2erayservice ./test/e2erayjobsubmitter ./test/e2eraycronjob ./test/sampleyaml
-  # Suite wall-clock budget for first pass (midstream dispatch poll will likely need a bump beyond ~2.5h).
-  E2E_GO_TEST_TIMEOUT: 240m
+  # Post-split equivalent of the previous ./test/e2e suite (RayJob tests moved to e2erayjob).
+  E2E_TEST_PACKAGES: ./test/e2e ./test/e2erayjob
+  E2E_GO_TEST_TIMEOUT: 150m
 
 jobs:
   run_kuberay_post_merge_e2e_tests:
@@ -68,6 +66,17 @@ jobs:
           docker pull "${KUBERAY_TEST_RAY_IMAGE}"
           kind load docker-image "${KUBERAY_TEST_RAY_IMAGE}"
 
+      - name: Patch e2e resources for Kind (update-resources pr)
+        if: steps.deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # Same approach as midstream scripts/run-e2e-rayjob-kind.sh: lower requests/limits for Kind.
+          SUPPORT_GO="${GITHUB_WORKSPACE}/kuberay/ray-operator/test/support/support.go"
+          (
+            cd "${GITHUB_WORKSPACE}/kuberay/scripts"
+            go run ./update-resources.go -scenario pr "${SUPPORT_GO}"
+          )
+
       - name: Start namespace cleanup script
         if: steps.deploy.outcome == 'success'
         run: |
@@ -90,7 +99,7 @@ jobs:
                   echo "$(date): Cleaning up namespace: $ns"
                   
                   # FIRST: Remove finalizers from Ray CRDs (this is what blocks deletion)
-                  for resource in rayclusters.ray.io rayservices.ray.io rayjobs.ray.io raycronjobs.ray.io; do
+                  for resource in rayclusters.ray.io rayservices.ray.io rayjobs.ray.io; do
                     for name in $(kubectl get "$resource" -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
                       echo "  Removing finalizers from $resource/$name"
                       timeout 10s kubectl patch "$resource" "$name" -n "$ns" --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
@@ -135,8 +144,7 @@ jobs:
           echo "Running packages: ${E2E_TEST_PACKAGES}"
           echo "Ray image: ${KUBERAY_TEST_RAY_IMAGE}"
 
-          # Sequential package/test execution keeps Kind resource pressure predictable.
-          # Skip historically flaky / Kind-unsuitable cases; leave everything else enabled for discovery.
+          # Sequential execution keeps Kind resource pressure predictable.
           # shellcheck disable=SC2086
           go test -timeout "${E2E_GO_TEST_TIMEOUT}" -v \
             ${E2E_TEST_PACKAGES} \
