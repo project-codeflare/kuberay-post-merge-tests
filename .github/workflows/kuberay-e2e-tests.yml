@@ -61,7 +61,7 @@ jobs:
           make docker-build -e IMG="${IMG}" -e ENGINE=docker
           kind load docker-image ${IMG}
 
-          make deploy -e IMG="${IMG}"
+          make deploy-with-override -e IMG="${IMG}"
           kubectl wait --timeout=90s --for=condition=Available=true deployment -n default kuberay-operator
 
       - name: Pre-pull Ray test image into Kind
