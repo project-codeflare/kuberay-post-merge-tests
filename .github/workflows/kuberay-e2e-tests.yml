@@ -68,11 +68,28 @@ jobs:
         if: steps.deploy.outcome == 'success'
         run: |
           set -euo pipefail
-          # Single-platform pull: multi-arch tags break `kind load docker-image`
-          # (ctr --import --all-platforms expects arm64 layers not present on amd64 runners).
-          echo "Pulling ${KUBERAY_TEST_RAY_IMAGE} (linux/amd64)"
-          docker pull --platform linux/amd64 "${KUBERAY_TEST_RAY_IMAGE}"
-          docker save "${KUBERAY_TEST_RAY_IMAGE}" | kind load image-archive /dev/stdin
+          IMAGE="${KUBERAY_TEST_RAY_IMAGE}"
+          case "${IMAGE}" in
+            *.*/*|*:*/*) REF="${IMAGE}" ;;
+            */*) REF="docker.io/${IMAGE}" ;;
+            *) REF="docker.io/library/${IMAGE}" ;;
+          esac
+          # Host-side `kind load` / `image-archive` still runs ctr import --all-platforms and
+          # fails on multi-arch Hub tags (missing arm64 blob on amd64 runners).
+          echo "Pulling ${REF} on kind-control-plane (linux/amd64)"
+          if docker exec kind-control-plane ctr --namespace=k8s.io images pull \
+              --platform linux/amd64 "${REF}"; then
+            echo "Ray image loaded via in-cluster containerd pull"
+          else
+            echo "In-cluster pull failed; importing single-arch tarball (no kind load)"
+            docker pull --platform linux/amd64 "${REF}"
+            TAR="$(mktemp)"
+            docker save -o "${TAR}" "$(docker image inspect --format '{{.Id}}' "${REF}")"
+            docker cp "${TAR}" kind-control-plane:/tmp/ray-preload.tar
+            docker exec kind-control-plane ctr -n k8s.io images import /tmp/ray-preload.tar
+            docker exec kind-control-plane rm -f /tmp/ray-preload.tar
+            rm -f "${TAR}"
+          fi
 
       - name: Patch e2e resources for Kind (update-resources pr)
         if: steps.deploy.outcome == 'success'
