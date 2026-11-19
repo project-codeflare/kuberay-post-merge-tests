@@ -6,8 +6,8 @@ on:
 
 env:
   # Keep in sync with midstream ray-operator go.mod / CI.
-  GO_VERSION: '1.25'
-  KUBERAY_TEST_RAY_IMAGE: rayproject/ray:2.55.1
+  GO_VERSION: '1.26'
+  KUBERAY_TEST_RAY_IMAGE: rayproject/ray:2.58.0
   KUBERAY_TEST_TIMEOUT_SHORT: 7m
   KUBERAY_TEST_TIMEOUT_MEDIUM: 12m
   KUBERAY_TEST_TIMEOUT_LONG: 15m
@@ -16,7 +16,7 @@ env:
   E2E_GO_TEST_TIMEOUT: 150m
   # Align closer to pre-sync post-merge coverage; skip Kind-unsuitable / known-bad cases.
   # - Recovery/AuthRhoai: historically unsuitable on Kind
-  # - Sidecar + DeletionStrategy: post-sync failures/flake on Kind+Ray 2.55.1
+  # - Sidecar + DeletionStrategy: post-sync failures/flake on Kind (Ray 2.58.0+)
   #   (Sidecar Retry subtest needs full path for go test -skip)
   # - MultiHost/SingleHost/UpgradeStrategy/AuthOptions: net-new vs Jul 10 successful suite
   E2E_TEST_SKIP: TestRayJobRecovery|TestRayClusterAuthenticationRhoai|TestRayJobSidecarMode|TestRayJobRetry/Failing_RayJob_with_SidecarMode|TestDeletionStrategy|TestRayClusterMultiHostMultiSlice|TestRayClusterSingleHostMultiSlice|TestRayClusterUpgradeStrategy|TestRayClusterAuthOptions
@@ -68,9 +68,11 @@ jobs:
         if: steps.deploy.outcome == 'success'
         run: |
           set -euo pipefail
-          echo "Pulling ${KUBERAY_TEST_RAY_IMAGE}"
-          docker pull "${KUBERAY_TEST_RAY_IMAGE}"
-          kind load docker-image "${KUBERAY_TEST_RAY_IMAGE}"
+          # Single-platform pull: multi-arch tags break `kind load docker-image`
+          # (ctr --import --all-platforms expects arm64 layers not present on amd64 runners).
+          echo "Pulling ${KUBERAY_TEST_RAY_IMAGE} (linux/amd64)"
+          docker pull --platform linux/amd64 "${KUBERAY_TEST_RAY_IMAGE}"
+          docker save "${KUBERAY_TEST_RAY_IMAGE}" | kind load image-archive /dev/stdin
 
       - name: Patch e2e resources for Kind (update-resources pr)
         if: steps.deploy.outcome == 'success'
